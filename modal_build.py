@@ -62,6 +62,37 @@ CLEAN UP WHEN DONE  (safe — only touches THIS volume)
 ================================================================================
     modal volume ls     vergil-artifacts /
     modal volume delete vergil-artifacts            # back up first!
+
+================================================================================
+IF A STAGE FAILS (CONTINGENCIES)
+================================================================================
+GENERAL RULE: every stage is idempotent and writes its output to the volume, so the
+universal fallback is "fix the cause and re-run just that `--stage`." Later stages
+read the earlier stage's pickle/parquet from the volume, so you never restart from 0.
+
+  * Amazon parquet 404 / shard path or count changed
+        → `python -c "from huggingface_hub import list_repo_files as l; print([f for f in
+          l('McAuley-Lab/Amazon-Reviews-2023', repo_type='dataset') if 'raw_meta_Electronics' in f])"`
+          and adjust AMAZON_PARQUET. NEVER use the loading script (dead on datasets>=4).
+  * Graph too SPARSE (few edges → tiny/empty communities)
+        → bought_together is empty by design (audited); lower SIM_THRESHOLD 0.85→0.80
+          and/or raise top_k in add_similarity_edges so brand/category/feature/similar_to
+          carry the graph.
+  * cdlib / leidenalg / python-igraph install or import failure
+        → fall back to networkx `greedy_modularity_communities` (lower quality, no C deps);
+          wrap detect_communities accordingly.
+  * One giant community (blob)
+        → raise LEIDEN_RESOLUTION (1.0→1.5→2.0) and/or cap similar_to edges.
+  * Qwen OOM on the A100
+        → set LLM_MODEL = "Qwen/Qwen2.5-3B-Instruct" (or load in 4-bit). Summaries are
+          short, 3B is fine.
+  * Summaries empty / hallucinated
+        → lower temperature, tighten the prompt, skip <3-product clusters, re-run
+          `--stage summarize` (graph + communities are already on the volume).
+  * Modal preemption / timeout
+        → re-run the failed `--stage`; everything prior is persisted on the volume.
+  * Inference (Kaggle T4) OOM later
+        → Qwen 3B Q4 GGUF, lazy-load models, faiss-cpu, fewer candidates.
 ================================================================================
 """
 
