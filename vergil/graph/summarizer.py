@@ -70,10 +70,17 @@ def embed_summaries(summaries: list[dict], model) -> tuple:
 
 
 def _get_brand(G: nx.Graph, product_id: str) -> str:
-    """Return the brand name of a product node (via its has_brand edge)."""
-    raise NotImplementedError("TODO: see VERGIL_BUILD_PLAN.md §5.2")
+    """Return the brand NAME of a product node (via its has_brand edge), or 'Unknown'."""
+    for neighbor in G.neighbors(product_id):
+        if G.nodes.get(neighbor, {}).get("type") == "brand":
+            return G.nodes[neighbor].get("name", "Unknown")
+    return "Unknown"
 
 
 def _get_top_brands(G: nx.Graph, community: list[str], top_n: int = 5) -> list[str]:
-    """Return the most common brands among the products in a community."""
-    raise NotImplementedError("TODO: see VERGIL_BUILD_PLAN.md §5.2")
+    """Return the most-connected brands among the nodes in a community."""
+    brands = {}
+    for node in community:
+        if G.nodes.get(node, {}).get("type") == "brand":
+            brands[G.nodes[node].get("name", node)] = sum(1 for _ in G.neighbors(node))
+    return sorted(brands.items(), key=lambda x: x[1], reverse=True)[:top_n]

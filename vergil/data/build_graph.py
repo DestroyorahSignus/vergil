@@ -1,4 +1,5 @@
 # data/build_graph.py
+import faiss
 import networkx as nx
 import pandas as pd
 
@@ -108,7 +109,7 @@ def extract_features(G: nx.Graph, product_nodes: list[dict]):
     raise NotImplementedError("TODO: see VERGIL_BUILD_PLAN.md §4.3")
 
 
-def add_similarity_edges(G: nx.Graph, encoder=None, threshold: float = 0.85):
+def add_similarity_edges(G: nx.Graph, encoder=None, threshold: float = 0.85, top_k: int = 5):
     """
     Encode all product descriptions with a bi-encoder, find pairs with cosine > threshold,
     add 'similar_to' edges.
@@ -124,6 +125,35 @@ def add_similarity_edges(G: nx.Graph, encoder=None, threshold: float = 0.85):
     """
     if encoder is None:
         encoder = SentenceTransformer(DEFAULT_ENCODER)
-    # Use FAISS for efficient similarity search
-    # Only add top-5 similar products per node (avoid over-connecting)
-    raise NotImplementedError("TODO: see VERGIL_BUILD_PLAN.md §4.4")
+
+    product_nodes = [(n, d) for n, d in G.nodes(data=True) if d.get("type") == "product"]
+    if not product_nodes:
+        return
+    ids = [n for n, _ in product_nodes]
+    texts = [d.get("description", "") or d.get("name", "") for _, d in product_nodes]
+
+    embeddings = encoder.encode(
+        texts, batch_size=256, normalize_embeddings=True, show_progress_bar=True
+    )
+
+    index = faiss.IndexFlatIP(embeddings.shape[1])
+    index.add(embeddings)
+    # top_k + 1 because the nearest neighbour of each product is itself.
+    scores, indices = index.search(embeddings, top_k + 1)
+
+    for i, pid in enumerate(ids):
+        pid_brand = _get_brand(G, pid)
+        for j in range(1, top_k + 1):
+            if scores[i][j] >= threshold:
+                neighbor_id = ids[indices[i][j]]
+                # Only cross-brand edges — same-brand links already exist via has_brand.
+                if _get_brand(G, neighbor_id) != pid_brand:
+                    G.add_edge(pid, neighbor_id, type="similar_to", weight=float(scores[i][j]))
+
+
+def _get_brand(G: nx.Graph, product_id: str):
+    """Return the brand NODE id linked to a product via its has_brand edge (or None)."""
+    for neighbor in G.neighbors(product_id):
+        if G.edges[product_id, neighbor].get("type") == "has_brand":
+            return neighbor
+    return None

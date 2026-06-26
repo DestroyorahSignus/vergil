@@ -48,6 +48,38 @@ Scoring: manual 1-5 evaluation on faithfulness + relevance + completeness.
 _TODO: end-to-end build steps (download → graph → communities → RAG → demo). See
 `VERGIL_BUILD_PLAN.md` §10 for the build sequence._
 
+## Build the graph + GraphRAG index on Modal
+
+`modal_build.py` is a self-contained Modal job that builds every artifact VERGIL needs:
+the knowledge graph, similarity edges, Leiden communities, and the LLM community
+summaries + their embeddings. Nothing is *trained* (VERGIL has no trainable model) — the
+two GPU stages are short bursts (bge-small encoding, and Qwen2.5-7B writing summaries via
+`transformers`). It is fully isolated: its own app (`vergil-build`) and volume
+(`vergil-artifacts`), **no secrets attached**, no database, no shared state with any other
+project on your Modal workspace.
+
+```bash
+pip install modal && modal token new          # one-time auth
+
+modal run modal_build.py --stage all --limit 2000   # quick smoke test
+modal run modal_build.py --stage all                # full build
+```
+
+Stages (each reads the previous stage's output from the volume): `data` (CPU) → `graph`
+(CPU) → `enrich` (GPU) → `community` (CPU) → `summarize` (GPU). Run one at a time with
+`--stage <name>`.
+
+Pull artifacts to your machine (then push to HF Hub / Kaggle — not git):
+
+```bash
+modal volume get vergil-artifacts /graph.pkl              ./artifacts/graph.pkl
+modal volume get vergil-artifacts /communities.pkl        ./artifacts/communities.pkl
+modal volume get vergil-artifacts /summaries.json         ./artifacts/summaries.json
+modal volume get vergil-artifacts /summary_embeddings.npy ./artifacts/summary_embeddings.npy
+```
+
+Clean up when done (only touches this volume): `modal volume delete vergil-artifacts`.
+
 ## Production note
 
 This project uses **NetworkX in-memory** for the knowledge graph, which is correct at the
