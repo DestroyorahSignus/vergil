@@ -101,7 +101,13 @@ image = (
 )
 
 # ---- Config (mirror configs/default.yaml) -----------------------------------
-AMAZON_CONFIG = "raw_meta_Electronics"
+# Amazon-2023's HF loading script is dead (datasets>=4 removed trust_remote_code),
+# so we read the published parquet shards directly. 10 shards, ~161K rows each.
+AMAZON_REPO = "McAuley-Lab/Amazon-Reviews-2023"
+AMAZON_PARQUET = [
+    f"hf://datasets/{AMAZON_REPO}/raw_meta_Electronics/full-{i:05d}-of-00010.parquet"
+    for i in range(10)
+]
 SUBSAMPLE_N = 50_000
 ENCODER_NAME = "BAAI/bge-small-en-v1.5"        # VERGIL's standalone default encoder
 LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
@@ -180,12 +186,13 @@ def prepare_data(limit: int = 0):
     from datasets import load_dataset
 
     os.makedirs(f"{ARTIFACTS}/hf", exist_ok=True)
-    print(f"[data] loading {AMAZON_CONFIG} (this is large) ...")
-    ds = load_dataset(
-        "McAuley-Lab/Amazon-Reviews-2023", AMAZON_CONFIG,
-        split="full", trust_remote_code=True,
-    )
+    print(f"[data] loading Electronics meta from {len(AMAZON_PARQUET)} parquet shards ...")
+    # Parquet shards, NOT the (removed) loading script — no trust_remote_code.
+    ds = load_dataset("parquet", data_files=AMAZON_PARQUET, split="train")
     print(f"[data] raw products: {len(ds):,}")
+    # NOTE: bought_together / also_buy / also_view are unavailable in this dataset
+    # (audited 2026-06-26). The graph is built on brand + category + feature +
+    # similar_to edges; build_product_graph's co-purchase loops no-op harmlessly.
 
     ds = ds.filter(
         lambda r: bool(r.get("title")) and r.get("rating_number") is not None,
