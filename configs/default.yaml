@@ -1,0 +1,31 @@
+# VERGIL default configuration
+
+dataset:
+  category: Electronics          # one of the Amazon Reviews 2023 categories
+  subsample_top_n: 50000         # top products by rating_number
+  raw_dir: data/raw
+
+encoder:
+  # off-the-shelf default; SPARDA may inject DANTE's fine-tuned bi-encoder instead
+  name: BAAI/bge-small-en-v1.5
+
+graph:
+  similarity_threshold: 0.85     # cosine cutoff for similar_to edges
+  similarity_top_k: 5            # max similar_to edges per product node
+
+community:
+  leiden_resolution: 1.0         # higher = smaller, more specific communities
+  level1_resolution_factor: 0.5  # L1 resolution = resolution * this
+
+retrieval:
+  top_k: 5                       # results returned to the LLM
+  colbert_k: 50                  # candidates ColBERT retrieves before graph expansion
+  max_hops: 2                    # multi-hop BFS depth
+
+llm:
+  model_id: Qwen/Qwen2.5-7B-Instruct-GGUF
+  model_file: qwen2.5-7b-instruct-q4_k_m.gguf
+  n_ctx: 4096
+  n_gpu_layers: -1
+  max_tokens: 600
+  temperature: 0.1

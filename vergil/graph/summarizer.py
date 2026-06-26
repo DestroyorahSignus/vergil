@@ -1,0 +1,79 @@
+# graph/summarizer.py
+import networkx as nx
+
+COMMUNITY_SUMMARY_PROMPT = """You are analyzing a cluster of related products from an e-commerce catalog.
+
+Here are the products in this cluster:
+{product_list}
+
+Here are the relationships between them:
+{edge_list}
+
+Provide a concise summary (3-5 sentences) of this product cluster:
+1. What is the main theme/category of this cluster?
+2. What are the key brands represented?
+3. What are the common features/use cases?
+4. What types of products are frequently bought together?
+
+Summary:"""
+
+
+def summarize_communities(G: nx.Graph, communities: list[list[str]], llm) -> list[dict]:
+    """
+    Generate a natural-language summary for each community using the LLM.
+
+    This is the expensive step — batch it. For 50K products / ~500 communities,
+    expect ~500 LLM calls. At ~0.5s each on T4 with Qwen2.5-7B-Q4, that's ~4 min.
+
+    For training on A100, this is even faster. Or pre-compute on CPU with a smaller model.
+    """
+    summaries = []
+    for i, community in enumerate(communities):
+        # Get product info for this community
+        product_list = []
+        for node_id in community[:30]:  # cap at 30 products per summary
+            node_data = G.nodes[node_id]
+            if node_data.get("type") == "product":
+                product_list.append(f"- {node_data['name']} (Brand: {_get_brand(G, node_id)})")
+
+        # Get internal edges
+        subgraph = G.subgraph(community)
+        edge_list = []
+        for u, v, data in subgraph.edges(data=True):
+            edge_list.append(f"- {G.nodes[u]['name'][:50]} --[{data.get('type', 'related')}]--> {G.nodes[v]['name'][:50]}")
+
+        prompt = COMMUNITY_SUMMARY_PROMPT.format(
+            product_list="\n".join(product_list[:20]),
+            edge_list="\n".join(edge_list[:20])
+        )
+
+        summary = llm.generate(prompt, max_tokens=300)
+        summaries.append({
+            "community_id": i,
+            "summary": summary,
+            "num_products": len([n for n in community if G.nodes[n].get("type") == "product"]),
+            "key_brands": _get_top_brands(G, community),
+            "product_ids": community,
+        })
+
+    return summaries
+
+
+def embed_summaries(summaries: list[dict], model) -> tuple:
+    """
+    Encode community summaries with the bi-encoder for vector retrieval.
+    These enable "global search" — finding relevant communities for broad queries.
+    """
+    texts = [s["summary"] for s in summaries]
+    embeddings = model.encode(texts, show_progress_bar=True)
+    return embeddings  # shape: (num_communities, embedding_dim)
+
+
+def _get_brand(G: nx.Graph, product_id: str) -> str:
+    """Return the brand name of a product node (via its has_brand edge)."""
+    raise NotImplementedError("TODO: see VERGIL_BUILD_PLAN.md §5.2")
+
+
+def _get_top_brands(G: nx.Graph, community: list[str], top_n: int = 5) -> list[str]:
+    """Return the most common brands among the products in a community."""
+    raise NotImplementedError("TODO: see VERGIL_BUILD_PLAN.md §5.2")

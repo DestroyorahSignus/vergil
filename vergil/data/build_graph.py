@@ -1,0 +1,129 @@
+# data/build_graph.py
+import networkx as nx
+import pandas as pd
+
+from sentence_transformers import SentenceTransformer
+
+# VERGIL ships its own default encoder so the repo is fully standalone.
+# A consumer (e.g. SPARDA) may inject a stronger fine-tuned model instead.
+DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5"   # off-the-shelf, ~0.13GB, no external repo
+
+
+def build_product_graph(meta_df: pd.DataFrame) -> nx.Graph:
+    """
+    Build a heterogeneous knowledge graph from Amazon metadata.
+
+    Node counts (approximate for 50K Electronics subsample):
+    - ~50,000 product nodes
+    - ~5,000 brand nodes
+    - ~500 category nodes
+    - ~2,000 feature nodes (extracted)
+
+    Edge counts:
+    - bought_together: ~100K+ edges (high-value co-purchase signal)
+    - has_brand: ~50K edges (every product → its brand)
+    - in_category: ~50K+ edges (products → category path nodes)
+    - has_feature: ~80K edges (extracted features)
+    - similar_to: ~250K edges (embedding similarity, computed later)
+    """
+    G = nx.Graph()
+
+    for _, row in meta_df.iterrows():
+        asin = row["parent_asin"]
+
+        # Add product node
+        G.add_node(asin, type="product", name=row["title"],
+                   description=_build_description(row),
+                   price=row.get("price"), rating=row.get("average_rating"))
+
+        # Add brand node + edge
+        brand = _extract_brand(row)
+        if brand:
+            brand_id = f"brand:{brand.lower()}"
+            G.add_node(brand_id, type="brand", name=brand)
+            G.add_edge(asin, brand_id, type="has_brand")
+
+        # Add category nodes + edges (hierarchical)
+        for cat_path in row.get("categories", []):
+            if isinstance(cat_path, list):
+                for i, cat in enumerate(cat_path):
+                    cat_id = f"cat:{cat.lower()}"
+                    G.add_node(cat_id, type="category", name=cat)
+                    G.add_edge(asin, cat_id, type="in_category")
+                    # Category hierarchy edges
+                    if i > 0:
+                        parent_id = f"cat:{cat_path[i-1].lower()}"
+                        G.add_edge(parent_id, cat_id, type="category_parent")
+
+        # Add co-purchase edges (bought_together)
+        for related_asin in row.get("bought_together", []) or []:
+            if related_asin in meta_df["parent_asin"].values:
+                G.add_edge(asin, related_asin, type="bought_together", weight=2.0)
+
+        # Add also_bought / also_viewed edges (weaker signal)
+        for related_asin in (row.get("also_buy", []) or [])[:10]:  # cap at 10
+            if related_asin in meta_df["parent_asin"].values:
+                G.add_edge(asin, related_asin, type="also_bought", weight=1.0)
+
+    return G
+
+
+def _build_description(row) -> str:
+    """Combine title + features + description into a rich text blob."""
+    parts = [row.get("title", "")]
+    features = row.get("features", [])
+    if features:
+        parts.append(" | ".join(features[:5]))  # top 5 bullet points
+    desc = row.get("description", "")
+    if desc:
+        parts.append(desc[:500])  # truncate long descriptions
+    return " ".join(parts)
+
+
+def _extract_brand(row) -> str | None:
+    """Extract brand from details dict or store field."""
+    details = row.get("details", {}) or {}
+    brand = details.get("Brand") or details.get("Manufacturer") or row.get("store")
+    return brand.strip() if brand else None
+
+
+def extract_features(G: nx.Graph, product_nodes: list[dict]):
+    """
+    Extract product features from titles/descriptions.
+    Use simple keyword extraction (TF-IDF top terms or KeyBERT).
+    These become feature nodes in the graph.
+
+    Examples:
+    - "Sony WH-1000XM5 Wireless Noise Cancelling Headphones"
+      → features: ["wireless", "noise cancelling", "headphones", "over-ear"]
+    - "Anker 65W USB-C Charger"
+      → features: ["usb-c", "fast charging", "65w", "portable"]
+
+    Option A: Simple — use sklearn TfidfVectorizer, take top terms per product.
+    Option B: Better — use KeyBERT with a small sentence-transformer.
+    Option C: Best — use the Qwen2.5 LLM to extract structured features (offline, batch).
+
+    Go with Option A for speed. Option C is a nice "future work" mention.
+    """
+    raise NotImplementedError("TODO: see VERGIL_BUILD_PLAN.md §4.3")
+
+
+def add_similarity_edges(G: nx.Graph, encoder=None, threshold: float = 0.85):
+    """
+    Encode all product descriptions with a bi-encoder, find pairs with cosine > threshold,
+    add 'similar_to' edges.
+
+    Args:
+        encoder: a SentenceTransformer (or anything with .encode). If None, VERGIL loads
+                 its own DEFAULT_ENCODER — keeping the repo standalone. SPARDA passes
+                 DANTE's fine-tuned bi-encoder here for higher-quality edges.
+
+    This connects products that are semantically related but NOT in the co-purchase data.
+    Only add edges between products of DIFFERENT brands (same-brand connections are
+    already captured by has_brand edges).
+    """
+    if encoder is None:
+        encoder = SentenceTransformer(DEFAULT_ENCODER)
+    # Use FAISS for efficient similarity search
+    # Only add top-5 similar products per node (avoid over-connecting)
+    raise NotImplementedError("TODO: see VERGIL_BUILD_PLAN.md §4.4")
