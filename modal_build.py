@@ -112,20 +112,25 @@ ARTIFACTS = "/artifacts"
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "torch>=2.2",
-        "transformers>=4.48",
-        "accelerate>=0.30",
-        "sentence-transformers>=5.0.0",
-        "datasets>=2.19",
-        "pandas>=2.0",
-        "numpy",
+        # Shared ML stack pinned to the versions DANTE validated on Modal 2026-06-28
+        # (reproducibility — see VERGIL_BUILD_PLAN.md §11). The graph-specific deps
+        # below stay at >= until a VERGIL --stage data/graph smoke captures their
+        # resolved versions (don't hard-pin untested versions).
+        "torch==2.12.1",
+        "transformers==5.12.1",
+        "accelerate==1.14.0",
+        "sentence-transformers==5.6.0",
+        "datasets==5.0.0",
+        "pandas==3.0.3",
+        "numpy==2.4.6",
+        "faiss-cpu==1.14.3",
+        # --- graph stack: pin after a VERGIL smoke captures resolved versions ---
         "scikit-learn>=1.3",
         "networkx>=3.2",
         "cdlib>=0.4.0",
         "leidenalg>=0.10.0",
         "python-igraph>=0.11.0",
         "rapidfuzz>=3.6.0",
-        "faiss-cpu>=1.7.4",
     )
     .env({"HF_HOME": f"{ARTIFACTS}/hf", "TOKENIZERS_PARALLELISM": "false"})
     .add_local_python_source("vergil")
