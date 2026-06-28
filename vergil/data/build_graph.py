@@ -29,6 +29,10 @@ def build_product_graph(meta_df: pd.DataFrame) -> nx.Graph:
     """
     G = nx.Graph()
 
+    # Precompute the set of valid ASINs ONCE — membership in a pandas .values array
+    # is O(N) per check, making the per-row co-purchase loops O(N^2). A set is O(1).
+    valid_asins = set(meta_df["parent_asin"])
+
     for _, row in meta_df.iterrows():
         asin = row["parent_asin"]
 
@@ -40,8 +44,17 @@ def build_product_graph(meta_df: pd.DataFrame) -> nx.Graph:
         # Add brand node + edge
         brand = _extract_brand(row)
         if brand:
-            brand_id = f"brand:{brand.lower()}"
-            G.add_node(brand_id, type="brand", name=brand)
+            # Canonicalize so storefront fragments ("Visit the X Store", "X Store",
+            # "by X") collapse to one brand node. Keep the prettiest display name.
+            brand_key = _canon_brand(brand)
+            brand_id = f"brand:{brand_key}"
+            if not G.has_node(brand_id):
+                G.add_node(brand_id, type="brand", name=brand)
+            else:
+                # Keep the prettiest (shortest, title-ish) display name we've seen.
+                existing = G.nodes[brand_id].get("name", brand)
+                if len(brand) < len(existing):
+                    G.nodes[brand_id]["name"] = brand
             G.add_edge(asin, brand_id, type="has_brand")
 
         # Add category nodes + edges (hierarchical)
@@ -58,12 +71,13 @@ def build_product_graph(meta_df: pd.DataFrame) -> nx.Graph:
 
         # Add co-purchase edges (bought_together)
         for related_asin in row.get("bought_together", []) or []:
-            if related_asin in meta_df["parent_asin"].values:
+            if related_asin in valid_asins:
                 G.add_edge(asin, related_asin, type="bought_together", weight=2.0)
 
         # Add also_bought / also_viewed edges (weaker signal)
+        # also_buy/also_view absent in Amazon-2023 Electronics (no-op); kept for forward-compat
         for related_asin in (row.get("also_buy", []) or [])[:10]:  # cap at 10
-            if related_asin in meta_df["parent_asin"].values:
+            if related_asin in valid_asins:
                 G.add_edge(asin, related_asin, type="also_bought", weight=1.0)
 
     return G
@@ -86,6 +100,27 @@ def _extract_brand(row) -> str | None:
     details = row.get("details", {}) or {}
     brand = details.get("Brand") or details.get("Manufacturer") or row.get("store")
     return brand.strip() if brand else None
+
+
+def _canon_brand(s: str) -> str:
+    """Canonical brand key: strip Amazon storefront cruft so fragments collapse.
+
+    Handles "Visit the X Store", "X Store", leading "by "; lowercases and
+    collapses internal whitespace. Used only for the brand NODE id (dedup key);
+    the human-readable display name is kept separately.
+    """
+    import re
+
+    s = (s or "").strip()
+    # "Visit the X Store" / "Visit X Store" -> X
+    s = re.sub(r"^visit\s+(the\s+)?", "", s, flags=re.IGNORECASE)
+    # trailing " Store" (storefront suffix) -> drop
+    s = re.sub(r"\s+store$", "", s, flags=re.IGNORECASE)
+    # leading "by " -> drop
+    s = re.sub(r"^by\s+", "", s, flags=re.IGNORECASE)
+    # lowercase + collapse whitespace
+    s = re.sub(r"\s+", " ", s.lower()).strip()
+    return s
 
 
 def extract_features(G: nx.Graph, product_nodes: list[dict]):
@@ -132,9 +167,18 @@ def add_similarity_edges(G: nx.Graph, encoder=None, threshold: float = 0.85, top
     ids = [n for n, _ in product_nodes]
     texts = [d.get("description", "") or d.get("name", "") for _, d in product_nodes]
 
-    embeddings = encoder.encode(
-        texts, batch_size=256, normalize_embeddings=True, show_progress_bar=True
-    )
+    try:
+        embeddings = encoder.encode(
+            texts, batch_size=256, normalize_embeddings=True, show_progress_bar=True
+        )
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            # CUDA OOM at batch_size=256 — retry once with a smaller batch.
+            embeddings = encoder.encode(
+                texts, batch_size=64, normalize_embeddings=True, show_progress_bar=True
+            )
+        else:
+            raise
 
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)

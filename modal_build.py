@@ -192,7 +192,7 @@ class _QwenSummarizer:
 
         self.tok = AutoTokenizer.from_pretrained(model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16, device_map="cuda"
+            model_id, dtype=torch.bfloat16, device_map="cuda"
         )
         self.model.eval()
 
@@ -280,6 +280,20 @@ def enrich_edges():
         pickle.dump(G, f)
     vol.commit()
     print(f"[enrich] added {G.number_of_edges() - before:,} similar_to edges")
+
+    # Connectivity summary — early detection of a sparse / fragmented graph.
+    import networkx as nx
+    from collections import Counter
+
+    edge_types = Counter(d.get("type", "?") for _, _, d in G.edges(data=True))
+    n_nodes = G.number_of_nodes()
+    if n_nodes:
+        largest_cc = max((len(c) for c in nx.connected_components(G)), default=0)
+        frac = largest_cc / n_nodes
+    else:
+        largest_cc, frac = 0, 0.0
+    print(f"[enrich] edges by type: {dict(sorted(edge_types.items()))}")
+    print(f"[enrich] nodes={n_nodes:,}  largest_cc={largest_cc:,} ({frac:.1%} of nodes)")
     return {"edges": G.number_of_edges()}
 
 

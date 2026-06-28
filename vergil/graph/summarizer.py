@@ -29,6 +29,25 @@ def summarize_communities(G: nx.Graph, communities: list[list[str]], llm) -> lis
     """
     summaries = []
     for i, community in enumerate(communities):
+        # Collect product node names for this community.
+        product_names = [
+            G.nodes[n].get("name", n)
+            for n in community
+            if G.nodes.get(n, {}).get("type") == "product"
+        ]
+
+        # Tiny/empty clusters make the LLM hallucinate — emit a deterministic stub
+        # (same dict shape) and skip the LLM call entirely.
+        if len(product_names) < 3:
+            summaries.append({
+                "community_id": i,
+                "summary": "Small cluster: " + "; ".join(product_names[:3]),
+                "num_products": len(product_names),
+                "key_brands": _get_top_brands(G, community),
+                "product_ids": community,
+            })
+            continue
+
         # Get product info for this community
         product_list = []
         for node_id in community[:30]:  # cap at 30 products per summary
