@@ -1,63 +1,86 @@
 # graph/community.py
+import igraph as ig
+import leidenalg
 import networkx as nx
-from cdlib import algorithms
+
+
+def _nx_to_igraph(G: nx.Graph):
+    """Convert a weighted networkx graph to igraph; return (igraph, node_list)."""
+    nodes = list(G.nodes())
+    index = {n: i for i, n in enumerate(nodes)}
+    edges, weights = [], []
+    for u, v, d in G.edges(data=True):
+        edges.append((index[u], index[v]))
+        weights.append(float(d.get("weight", 1.0)))
+    g = ig.Graph(n=len(nodes), edges=edges)
+    if weights:
+        g.es["weight"] = weights
+    return g, nodes
+
+
+def _leiden_partition(g: "ig.Graph", resolution: float, seed: int = 42):
+    """Weighted, resolution-controlled, reproducible Leiden via leidenalg DIRECTLY.
+
+    We call leidenalg rather than cdlib's `algorithms.leiden` because cdlib's
+    wrapper signature is version-fragile (rejects `seed` / `resolution_parameter`
+    on some releases). RBConfigurationVertexPartition is the resolution-aware
+    objective; find_partition accepts weights + resolution_parameter + seed.
+    """
+    weights = g.es["weight"] if "weight" in g.es.attributes() else None
+    return leidenalg.find_partition(
+        g,
+        leidenalg.RBConfigurationVertexPartition,
+        weights=weights,
+        resolution_parameter=resolution,
+        seed=seed,
+    )
 
 
 def detect_communities(G: nx.Graph, resolution: float = 1.0) -> dict:
-    """
-    Run Leiden community detection on the product graph.
+    """Run weighted Leiden community detection (L0 + L1) on the product graph.
 
-    Leiden is used (not Louvain) because:
-    1. It guarantees connected communities (Louvain can produce disconnected ones)
-    2. It's faster on large graphs
-    3. It's what Microsoft GraphRAG uses
+    leidenalg directly (not cdlib) for version-stable weights/resolution/seed control.
 
     Returns:
         {
-            "level_0": [community_0, community_1, ...],  # finest granularity
-            "level_1": [...],  # coarser (communities of communities)
+            "level_0": [[node_id, ...], ...],   # finest granularity, node-id lists
+            "level_1": [[l0_community_index, ...], ...],   # coarser: groups of L0 communities
         }
-        where each community is a set of node IDs
     """
-    # Install: pip install cdlib leidenalg
+    n_nodes = G.number_of_nodes()
+    if n_nodes == 0:
+        return {"level_0": [], "level_1": []}
 
-    # Level 0: fine-grained communities (weight-aware + reproducible)
-    communities_l0 = algorithms.leiden(G, weights="weight", seed=42,
-                                       resolution_parameter=resolution)
+    g, nodes = _nx_to_igraph(G)
+    part0 = _leiden_partition(g, resolution)
+    level_0 = [[nodes[i] for i in comm] for comm in part0]
 
     # Anti-blob guard: if one community swallows >40% of the graph, the resolution
-    # is too coarse — re-run L0 once at 2x resolution (same weights/seed).
-    n_nodes = G.number_of_nodes()
-    if communities_l0.communities and n_nodes:
-        largest = max(len(c) for c in communities_l0.communities)
-        if largest > 0.40 * n_nodes:
-            communities_l0 = algorithms.leiden(G, weights="weight", seed=42,
-                                               resolution_parameter=resolution * 2.0)
+    # is too coarse — re-run L0 once at 2x resolution.
+    if level_0 and max(len(c) for c in level_0) > 0.40 * n_nodes:
+        part0 = _leiden_partition(g, resolution * 2.0)
+        level_0 = [[nodes[i] for i in comm] for comm in part0]
 
-    # Level 1: coarser communities (run Leiden on the community graph)
-    # Build a community graph where nodes = L0 communities, edges = inter-community connections
-    community_graph = _build_community_graph(G, communities_l0)
-    if community_graph.number_of_nodes() > 1:
-        communities_l1 = algorithms.leiden(community_graph, weights="weight", seed=42,
-                                           resolution_parameter=resolution * 0.5)
-        level_1 = communities_l1.communities
+    # Level 1: contract to a community graph and re-cluster (guard single community).
+    if len(level_0) > 1:
+        community_graph = _build_community_graph(G, level_0)
+        cg, cg_nodes = _nx_to_igraph(community_graph)
+        part1 = _leiden_partition(cg, resolution * 0.5)
+        level_1 = [[cg_nodes[i] for i in comm] for comm in part1]
     else:
-        # Only one L0 community — nothing to coarsen into.
-        level_1 = [list(community_graph.nodes())] if community_graph.number_of_nodes() else []
+        level_1 = [list(range(len(level_0)))] if level_0 else []
 
-    return {
-        "level_0": communities_l0.communities,  # list of lists of node IDs
-        "level_1": level_1,
-    }
+    return {"level_0": level_0, "level_1": level_1}
 
 
-def _build_community_graph(G, communities):
-    """Contract the original graph to a community-level graph."""
-    # Each L0 community becomes a node
-    # Edge weight = number of inter-community edges in the original graph
+def _build_community_graph(G: nx.Graph, communities: list) -> nx.Graph:
+    """Contract G to a community-level graph. `communities` = list of node-id lists.
+
+    Each L0 community becomes a node; edge weight = #inter-community edges in G.
+    """
     CG = nx.Graph()
     node_to_community = {}
-    for i, comm in enumerate(communities.communities):
+    for i, comm in enumerate(communities):
         CG.add_node(i, size=len(comm))
         for node in comm:
             node_to_community[node] = i

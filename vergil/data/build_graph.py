@@ -1,6 +1,7 @@
 # data/build_graph.py
 import faiss
 import networkx as nx
+import numpy as np
 import pandas as pd
 
 from sentence_transformers import SentenceTransformer
@@ -8,6 +9,28 @@ from sentence_transformers import SentenceTransformer
 # VERGIL ships its own default encoder so the repo is fully standalone.
 # A consumer (e.g. SPARDA) may inject a stronger fine-tuned model instead.
 DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5"   # off-the-shelf, ~0.13GB, no external repo
+
+
+def _as_list(v) -> list:
+    """Normalize a parquet list-field to a plain Python list.
+
+    pyarrow/pandas return list columns (features, categories, description,
+    bought_together, ...) as numpy arrays. Using them in a boolean context
+    (`if features:`, `field or []`) raises "truth value of an array ... is
+    ambiguous". Always funnel such fields through this first.
+    """
+    if v is None:
+        return []
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    if hasattr(v, "tolist"):          # pandas/other array-likes
+        try:
+            return list(v.tolist())
+        except Exception:
+            return []
+    return [v]                         # scalar → single-element list
 
 
 def build_product_graph(meta_df: pd.DataFrame) -> nx.Graph:
@@ -37,7 +60,7 @@ def build_product_graph(meta_df: pd.DataFrame) -> nx.Graph:
         asin = row["parent_asin"]
 
         # Add product node
-        G.add_node(asin, type="product", name=row["title"],
+        G.add_node(asin, type="product", name=str(row.get("title") or ""),
                    description=_build_description(row),
                    price=row.get("price"), rating=row.get("average_rating"))
 
@@ -57,26 +80,28 @@ def build_product_graph(meta_df: pd.DataFrame) -> nx.Graph:
                     G.nodes[brand_id]["name"] = brand
             G.add_edge(asin, brand_id, type="has_brand")
 
-        # Add category nodes + edges (hierarchical)
-        for cat_path in row.get("categories", []):
-            if isinstance(cat_path, list):
-                for i, cat in enumerate(cat_path):
-                    cat_id = f"cat:{cat.lower()}"
-                    G.add_node(cat_id, type="category", name=cat)
-                    G.add_edge(asin, cat_id, type="in_category")
-                    # Category hierarchy edges
-                    if i > 0:
-                        parent_id = f"cat:{cat_path[i-1].lower()}"
-                        G.add_edge(parent_id, cat_id, type="category_parent")
+        # Add category nodes + edges (hierarchical). `categories` is a list of
+        # category PATHS (each path a list of strings); both levels may be numpy arrays.
+        for cat_path in _as_list(row.get("categories")):
+            cats = _as_list(cat_path)
+            for i, cat in enumerate(cats):
+                cat = str(cat)
+                cat_id = f"cat:{cat.lower()}"
+                G.add_node(cat_id, type="category", name=cat)
+                G.add_edge(asin, cat_id, type="in_category")
+                # Category hierarchy edges
+                if i > 0:
+                    parent_id = f"cat:{str(cats[i-1]).lower()}"
+                    G.add_edge(parent_id, cat_id, type="category_parent")
 
         # Add co-purchase edges (bought_together)
-        for related_asin in row.get("bought_together", []) or []:
+        for related_asin in _as_list(row.get("bought_together")):
             if related_asin in valid_asins:
                 G.add_edge(asin, related_asin, type="bought_together", weight=2.0)
 
         # Add also_bought / also_viewed edges (weaker signal)
         # also_buy/also_view absent in Amazon-2023 Electronics (no-op); kept for forward-compat
-        for related_asin in (row.get("also_buy", []) or [])[:10]:  # cap at 10
+        for related_asin in _as_list(row.get("also_buy"))[:10]:  # cap at 10
             if related_asin in valid_asins:
                 G.add_edge(asin, related_asin, type="also_bought", weight=1.0)
 
@@ -84,22 +109,28 @@ def build_product_graph(meta_df: pd.DataFrame) -> nx.Graph:
 
 
 def _build_description(row) -> str:
-    """Combine title + features + description into a rich text blob."""
-    parts = [row.get("title", "")]
-    features = row.get("features", [])
+    """Combine title + features + description into a rich text blob.
+
+    features/description are parquet list columns (numpy arrays) — normalize via
+    _as_list and coerce each element to str before joining.
+    """
+    parts = [str(row.get("title") or "")]
+    features = _as_list(row.get("features"))
     if features:
-        parts.append(" | ".join(features[:5]))  # top 5 bullet points
-    desc = row.get("description", "")
+        parts.append(" | ".join(str(f) for f in features[:5]))  # top 5 bullet points
+    desc = _as_list(row.get("description"))
     if desc:
-        parts.append(desc[:500])  # truncate long descriptions
-    return " ".join(parts)
+        parts.append((" ".join(str(d) for d in desc))[:500])  # truncate long descriptions
+    return " ".join(p for p in parts if p)
 
 
 def _extract_brand(row) -> str | None:
     """Extract brand from details dict or store field."""
-    details = row.get("details", {}) or {}
+    details = row.get("details")
+    if not isinstance(details, dict):
+        details = {}
     brand = details.get("Brand") or details.get("Manufacturer") or row.get("store")
-    return brand.strip() if brand else None
+    return str(brand).strip() if brand else None
 
 
 def _canon_brand(s: str) -> str:
