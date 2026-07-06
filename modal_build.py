@@ -147,7 +147,7 @@ AMAZON_PARQUET = [
 SUBSAMPLE_N = 50_000
 ENCODER_NAME = "BAAI/bge-small-en-v1.5"        # VERGIL's standalone default encoder
 LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-LEIDEN_RESOLUTION = 1.0
+LEIDEN_RESOLUTION = 4.0  # 1.0 gave 25 mega-communities (largest 8,187/50K); 4.0 targets ~100-400 finer ones
 SIM_THRESHOLD = 0.85
 
 GRAPH_PKL = f"{ARTIFACTS}/graph.pkl"
