@@ -4,10 +4,11 @@ leidenalg>=0.10.0
 python-igraph>=0.11.0
 pyvis>=0.3.2
 llama-cpp-python>=0.2.70    # for Qwen2.5 GGUF inference
-sentence-transformers==5.6.0  # bge-small default encoder; pinned to match modal_build image (SPARDA reproducibility)
+sentence-transformers==4.1.0  # bge-small default encoder; pinned to match modal_build image (DANTE-validated 4.x stack)
 ragatouille>=0.0.8           # ColBERT retriever (VERGIL's own — no dependency on DANTE)
+rerankers[transformers]==0.10.0  # ColBERT reranker; needs transformers 4.x (5.x removed internals it hooks)
 datasets>=2.19.0
-transformers>=4.45.0
+transformers>=4.48,<5        # Qwen2.5 needs only >=4.37; <5 required by the ColBERT reranker (validated on DANTE 2026-06-28)
 torch>=2.2.0
 faiss-cpu>=1.7.4
 gradio>=4.0.0

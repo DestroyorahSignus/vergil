@@ -21,6 +21,8 @@ WHAT THIS DOES (nothing is *trained* — VERGIL has no trainable model)
   enrich     (GPU) add embedding "similar_to" edges (bge-small encoder)
   community  (CPU) Leiden community detection (L0 + L1)
   summarize  (GPU) write LLM community summaries (Qwen2.5-7B) + embed them
+  rag_eval   (GPU) GraphRAG-vs-vanilla ablation over TEST_QUERIES (not part of
+             `--stage all`; run explicitly after the build)
 
 The two GPU stages are short bursts: bge-small is tiny, and Qwen here just runs
 inference to write ~hundreds of short summaries. (On Modal we run Qwen via
@@ -48,6 +50,9 @@ HOW TO RUN
     modal run modal_build.py --stage enrich
     modal run modal_build.py --stage community
     modal run modal_build.py --stage summarize
+
+    # GraphRAG-vs-vanilla eval (after the build; writes /artifacts/rag_eval.json):
+    modal run --detach modal_build.py --stage rag_eval
 
 ================================================================================
 GET THE ARTIFACTS ONTO YOUR PC  (then push to HF Hub / Kaggle, NOT git)
@@ -105,10 +110,10 @@ ARTIFACTS = "/artifacts"
 
 # Image carries every dep VERGIL's package imports at load time (networkx, cdlib,
 # leidenalg, sentence-transformers, sklearn, rapidfuzz, faiss) plus transformers
-# for the Qwen summary pass. NOTE: llama-cpp is intentionally NOT installed — the
-# package's llm.py is a stub that doesn't import it, and we summarize via
-# transformers here. `add_local_python_source("vergil")` bundles the local package
-# so the remote functions can call its real code.
+# for the Qwen summary/eval passes. NOTE: llama-cpp is intentionally NOT installed —
+# the package's llm.py guards that import (llama_cpp is the Kaggle-T4 GGUF route);
+# on Modal QwenLLM/QwenSummarizer run via transformers. `add_local_python_source
+# ("vergil")` bundles the local package so the remote functions can call its real code.
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -116,13 +121,22 @@ image = (
         # (reproducibility — see VERGIL_BUILD_PLAN.md §11). The graph-specific deps
         # below stay at >= until a VERGIL --stage data/graph smoke captures their
         # resolved versions (don't hard-pin untested versions).
+        #
+        # 4.x STACK RATIONALE (aligned 2026-07-06): Qwen2.5 needs only
+        # transformers>=4.37, and the ColBERT reranker (rerankers[transformers])
+        # requires the 4.x line — transformers 5.x removed the internals it hooks.
+        # This transformers 4.57.6 + sentence-transformers 4.1.0 + numpy 2.2.6
+        # combo is the one DANTE validated on Modal 2026-06-28. Note transformers
+        # 4.57 already supports the `dtype=` from_pretrained kwarg (torch_dtype is
+        # its deprecated alias), so _QwenSummarizer/QwenLLM work unchanged.
         "torch==2.12.1",
-        "transformers==5.12.1",
+        "transformers==4.57.6",
         "accelerate==1.14.0",
-        "sentence-transformers==5.6.0",
+        "sentence-transformers==4.1.0",
+        "rerankers[transformers]==0.10.0",
         "datasets==5.0.0",
         "pandas==3.0.3",
-        "numpy==2.4.6",
+        "numpy==2.2.6",
         "faiss-cpu==1.14.3",
         # --- graph stack: pin after a VERGIL smoke captures resolved versions ---
         "scikit-learn>=1.3",
@@ -155,6 +169,8 @@ META_PARQUET = f"{ARTIFACTS}/electronics_meta.parquet"
 COMMUNITIES_PKL = f"{ARTIFACTS}/communities.pkl"
 SUMMARIES_JSON = f"{ARTIFACTS}/summaries.json"
 SUMMARY_EMB_NPY = f"{ARTIFACTS}/summary_embeddings.npy"
+PRODUCT_EMB_NPY = f"{ARTIFACTS}/product_embeddings.npy"
+RAG_EVAL_JSON = f"{ARTIFACTS}/rag_eval.json"
 
 
 # ---- The two pieces the package leaves as stubs, implemented inline ----------
@@ -191,6 +207,8 @@ class _QwenSummarizer:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_id)
+        # `dtype=` verified supported on transformers 4.57.x (torch_dtype is the
+        # deprecated alias there) — no change needed for the 5.x -> 4.57.6 pin move.
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id, dtype=torch.bfloat16, device_map="cuda"
         )
@@ -344,12 +362,85 @@ def summarize():
     return {"summaries": len(summaries)}
 
 
+@app.function(image=image, volumes={ARTIFACTS: vol}, gpu="A100-80GB", timeout=2 * 60 * 60)
+def rag_eval():
+    """End-to-end GraphRAG-vs-vanilla ablation over the built artifacts.
+
+    Loads graph/communities/summaries/summary-embeddings from the volume, builds a
+    bge-small VectorIndex over the product descriptions (cached to the volume),
+    stands up QwenLLM (transformers backend) + VergilRAG, runs run_rag_ablation,
+    writes /artifacts/rag_eval.json, and prints the per-type table + graph stats.
+    """
+    import json
+    import os
+    import pickle
+
+    import numpy as np
+    from sentence_transformers import SentenceTransformer
+
+    from vergil.eval.evaluate import (
+        format_ablation_table, format_graph_stats, graph_statistics, run_rag_ablation,
+    )
+    from vergil.generation.llm import QwenLLM
+    from vergil.generation.rag_pipeline import VergilRAG
+    from vergil.retrieval.colbert_index import VectorIndex
+
+    with open(GRAPH_PKL, "rb") as f:
+        G = pickle.load(f)
+    with open(COMMUNITIES_PKL, "rb") as f:
+        comms = pickle.load(f)
+    with open(SUMMARIES_JSON) as f:
+        summaries = json.load(f)
+    summary_embs = np.load(SUMMARY_EMB_NPY)
+
+    encoder = SentenceTransformer(ENCODER_NAME, device="cuda")
+
+    # Product vector index (baseline retriever + VergilRAG's local-search index).
+    # build() itself uses/refreshes the .npy embedding cache on the volume
+    # (row-count checked against product_ids), so re-runs skip the encode pass.
+    products = [(n, d) for n, d in G.nodes(data=True) if d.get("type") == "product"]
+    cached = os.path.exists(PRODUCT_EMB_NPY)
+    print(f"[rag_eval] indexing {len(products):,} products "
+          f"({'cached embeddings' if cached else 'encoding — cache miss'}) ...")
+    index = VectorIndex(encoder=encoder).build(
+        [n for n, _ in products],
+        [d.get("description") or d.get("name", "") for _, d in products],
+        embeddings_path=PRODUCT_EMB_NPY,
+    )
+    if not cached:
+        vol.commit()
+        print(f"[rag_eval] cached -> {PRODUCT_EMB_NPY}")
+
+    print(f"[rag_eval] loading {LLM_MODEL} (transformers backend) ...")
+    llm = QwenLLM(LLM_MODEL, backend="transformers")
+    rag = VergilRAG(G, index, llm, summaries, summary_embs, encoder)
+
+    results = run_rag_ablation(rag, index, llm)
+
+    with open(RAG_EVAL_JSON, "w") as f:
+        json.dump(results, f, indent=2, default=str)
+    vol.commit()
+    print(f"[rag_eval] results -> {RAG_EVAL_JSON}")
+
+    print(format_ablation_table(results))
+    print(format_graph_stats(graph_statistics(G, communities=comms)))
+    return {
+        "queries": len(results["per_query"]),
+        "by_type": {t: a["n"] for t, a in results["by_type"].items()},
+    }
+
+
 @app.local_entrypoint()
 def main(stage: str = "all", limit: int = 0):
-    """Orchestrate. stage: all | data | graph | enrich | community | summarize."""
+    """Orchestrate. stage: all | data | graph | enrich | community | summarize | rag_eval.
+
+    NOTE: `all` = the 5 BUILD stages only; rag_eval is run explicitly afterwards
+    (it needs V2's retrieval/pipeline code and burns extra A100 minutes):
+        modal run --detach modal_build.py --stage rag_eval
+    """
     order = ["data", "graph", "enrich", "community", "summarize"]
-    if stage != "all" and stage not in order:
-        raise SystemExit(f"unknown stage {stage!r}; use all|{'|'.join(order)}")
+    if stage != "all" and stage != "rag_eval" and stage not in order:
+        raise SystemExit(f"unknown stage {stage!r}; use all|{'|'.join(order)}|rag_eval")
     todo = order if stage == "all" else [stage]
 
     if "data" in todo:
@@ -362,3 +453,5 @@ def main(stage: str = "all", limit: int = 0):
         print("== community =="); print(detect_communities_stage.remote())
     if "summarize" in todo:
         print("== summarize =="); print(summarize.remote())
+    if "rag_eval" in todo:
+        print("== rag_eval =="); print(rag_eval.remote())
