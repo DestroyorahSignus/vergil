@@ -1,5 +1,11 @@
 # generation/llm.py
-"""Qwen2.5 inference wrapper with two interchangeable backends.
+"""Qwen3-4B inference wrapper with two interchangeable backends.
+
+Generator model (research 2026-07-06): Qwen3-4B-Instruct-2507 — Apache-2.0,
+ungated, natively NON-thinking instruct (no <think> blocks, no enable_thinking
+flag needed), supported by transformers>=4.51. A strict upgrade over the previous
+Qwen2.5-7B-Instruct: at/above Qwen3-8B and above Qwen2.5-7B on benchmarks while
+using ~half the VRAM. Same standard apply_chat_template + .generate() path.
 
 * ``backend="transformers"`` (default) — HF ``AutoModelForCausalLM`` in bf16 on CUDA.
   This is the Modal A100 route and mirrors the ``_QwenSummarizer`` used during the
@@ -20,7 +26,7 @@ class QwenLLM:
 
     def __init__(
         self,
-        model_path_or_id: str = "Qwen/Qwen2.5-7B-Instruct",
+        model_path_or_id: str = "Qwen/Qwen3-4B-Instruct-2507",
         backend: str = "transformers",
         n_ctx: int = 4096,
         n_gpu_layers: int = -1,
@@ -35,9 +41,12 @@ class QwenLLM:
                 (transformers uses the model's native config).
             n_gpu_layers: llama_cpp only; -1 = all layers on GPU.
 
-        llama_cpp model file (Kaggle route):
-            huggingface-cli download Qwen/Qwen2.5-7B-Instruct-GGUF \
-                qwen2.5-7b-instruct-q4_k_m.gguf --local-dir models/
+        llama_cpp model file (Kaggle route): pass a local GGUF path as
+            model_path_or_id. A Qwen3-4B-Instruct-2507 Q4_K_M GGUF (~2.5GB, fits
+            the Kaggle T4 comfortably) is the recommended file, e.g.:
+            huggingface-cli download Qwen/Qwen3-4B-Instruct-2507-GGUF \
+                Qwen3-4B-Instruct-2507-Q4_K_M.gguf --local-dir models/
+            (verify the exact filename on the repo before downloading).
         """
         if backend not in ("transformers", "llama_cpp"):
             raise ValueError(f"unknown backend {backend!r}; use 'transformers' or 'llama_cpp'")

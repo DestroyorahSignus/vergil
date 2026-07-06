@@ -20,7 +20,7 @@ WHAT THIS DOES (nothing is *trained* — VERGIL has no trainable model)
   graph      (CPU) build the NetworkX knowledge graph + TF-IDF feature edges
   enrich     (GPU) add embedding "similar_to" edges (bge-small encoder)
   community  (CPU) Leiden community detection (L0 + L1)
-  summarize  (GPU) write LLM community summaries (Qwen2.5-7B) + embed them
+  summarize  (GPU) write LLM community summaries (Qwen3-4B-Instruct-2507) + embed them
   rag_eval   (GPU) GraphRAG-vs-vanilla ablation over TEST_QUERIES (not part of
              `--stage all`; run explicitly after the build)
 
@@ -89,8 +89,9 @@ read the earlier stage's pickle/parquet from the volume, so you never restart fr
   * One giant community (blob)
         → raise LEIDEN_RESOLUTION (1.0→1.5→2.0) and/or cap similar_to edges.
   * Qwen OOM on the A100
-        → set LLM_MODEL = "Qwen/Qwen2.5-3B-Instruct" (or load in 4-bit). Summaries are
-          short, 3B is fine.
+        → set LLM_MODEL to a smaller Qwen3 (e.g. "Qwen/Qwen3-1.7B") or load in
+          4-bit. Summaries are short; the default Qwen3-4B is already ~half the
+          VRAM of the old Qwen2.5-7B, so OOM is unlikely.
   * Summaries empty / hallucinated
         → lower temperature, tighten the prompt, skip <3-product clusters, re-run
           `--stage summarize` (graph + communities are already on the volume).
@@ -122,8 +123,8 @@ image = (
         # below stay at >= until a VERGIL --stage data/graph smoke captures their
         # resolved versions (don't hard-pin untested versions).
         #
-        # 4.x STACK RATIONALE (aligned 2026-07-06): Qwen2.5 needs only
-        # transformers>=4.37, and the ColBERT reranker (rerankers[transformers])
+        # 4.x STACK RATIONALE (aligned 2026-07-06): Qwen3-4B-Instruct-2507 needs
+        # transformers>=4.51 (satisfied), and the ColBERT reranker (rerankers[transformers])
         # requires the 4.x line — transformers 5.x removed the internals it hooks.
         # This transformers 4.57.6 + sentence-transformers 4.1.0 + numpy 2.2.6
         # combo is the one DANTE validated on Modal 2026-06-28. Note transformers
@@ -160,7 +161,13 @@ AMAZON_PARQUET = [
 ]
 SUBSAMPLE_N = 50_000
 ENCODER_NAME = "BAAI/bge-small-en-v1.5"        # VERGIL's standalone default encoder
-LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+# Generator LLM (research 2026-07-06): Qwen3-4B-Instruct-2507 is a strict upgrade
+# over Qwen2.5-7B-Instruct — Apache-2.0 + ungated, natively NON-thinking instruct
+# (no <think> blocks / no enable_thinking flag needed), supported by transformers
+# >=4.51 so fine on the pinned 4.57.6. Benchmarks at/above Qwen3-8B and above
+# Qwen2.5-7B while using ~half the VRAM (~2.5GB Q4 GGUF — good for the Kaggle T4
+# story). Same standard apply_chat_template + .generate() path, no code changes.
+LLM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 LEIDEN_RESOLUTION = 4.0  # 1.0 gave 25 mega-communities (largest 8,187/50K); 4.0 targets ~100-400 finer ones
 SIM_THRESHOLD = 0.85
 
@@ -217,6 +224,9 @@ class _QwenSummarizer:
     def generate(self, prompt: str, max_tokens: int = 300, temperature: float = 0.1) -> str:
         import torch
 
+        # Standard chat template — works identically for Qwen3-4B-Instruct-2507.
+        # That model is NON-thinking by default (no <think> blocks emitted), so no
+        # enable_thinking / thinking-parse handling is required here.
         text = self.tok.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False, add_generation_prompt=True,

@@ -168,7 +168,7 @@ def extract_features(G: nx.Graph, product_nodes: list[dict]):
 
     Option A: Simple — use sklearn TfidfVectorizer, take top terms per product.
     Option B: Better — use KeyBERT with a small sentence-transformer.
-    Option C: Best — use the Qwen2.5 LLM to extract structured features (offline, batch).
+    Option C: Best — use the Qwen3 LLM to extract structured features (offline, batch).
 
     Go with Option A for speed. Option C is a nice "future work" mention.
     """

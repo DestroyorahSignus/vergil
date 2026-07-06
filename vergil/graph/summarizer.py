@@ -23,7 +23,7 @@ def summarize_communities(G: nx.Graph, communities: list[list[str]], llm) -> lis
     Generate a natural-language summary for each community using the LLM.
 
     This is the expensive step — batch it. For 50K products / ~500 communities,
-    expect ~500 LLM calls. At ~0.5s each on T4 with Qwen2.5-7B-Q4, that's ~4 min.
+    expect ~500 LLM calls. At ~0.5s each on T4 with Qwen3-4B-Q4, that's ~4 min.
 
     For training on A100, this is even faster. Or pre-compute on CPU with a smaller model.
     """
