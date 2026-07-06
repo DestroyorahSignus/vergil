@@ -90,8 +90,10 @@ class VergilRAG:
         q = query.lower()
         global_keywords = ["compare", "vs", "versus", "trend", "overview", "popular",
                            "best brands", "market", "landscape"]
-        multi_hop_keywords = ["works with", "compatible", "accessories", "from same brand",
-                              "bought together", "pair with", "goes with", "along with"]
+        multi_hop_keywords = ["works with", "work with", "compatible", "accessories",
+                              "same brand", "same-brand", "bought together", "buy together",
+                              "buy with", "frequently bought", "commonly bought", "pair with",
+                              "pairs with", "goes with", "go with", "along with", "go together"]
         if any(kw in q for kw in global_keywords):
             return "global"
         if any(kw in q for kw in multi_hop_keywords):
