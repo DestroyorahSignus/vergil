@@ -104,3 +104,50 @@ class QwenLLM:
             temperature=temperature,
         )
         return (response["choices"][0]["message"]["content"] or "").strip()
+
+    def generate_stream(self, prompt: str, max_tokens: int = 512, temperature: float = 0.1):
+        """Yield the assistant text incrementally as it is generated (token chunks).
+
+        Used by streaming UIs so the SSE/websocket connection keeps receiving data during a
+        long generation instead of going idle (which a proxy will drop → 'connection lost').
+        """
+        if self.backend == "transformers":
+            import threading
+
+            from transformers import TextIteratorStreamer
+
+            torch = self._torch
+            text = self.tok.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False, add_generation_prompt=True,
+            )
+            inputs = self.tok(text, return_tensors="pt").to("cuda")
+            streamer = TextIteratorStreamer(
+                self.tok, skip_prompt=True, skip_special_tokens=True,
+            )
+            gen_kwargs = dict(
+                **inputs, max_new_tokens=max_tokens,
+                do_sample=temperature > 0, temperature=max(temperature, 1e-4),
+                pad_token_id=self.tok.eos_token_id, streamer=streamer,
+            )
+
+            def _run():
+                with torch.no_grad():
+                    self.model.generate(**gen_kwargs)
+
+            thread = threading.Thread(target=_run, daemon=True)
+            thread.start()
+            for chunk in streamer:
+                if chunk:
+                    yield chunk
+            thread.join()
+            return
+
+        # llama_cpp streaming
+        for part in self.llm.create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens, temperature=temperature, stream=True,
+        ):
+            delta = part["choices"][0].get("delta", {}).get("content")
+            if delta:
+                yield delta
