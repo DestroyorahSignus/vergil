@@ -275,6 +275,13 @@ it fits the pinned 4.57.6), and benchmarking **at or above Qwen3-8B and above Qw
 using ~half the VRAM** (~2.5 GB as a Q4 GGUF — a real win for the Kaggle-T4 inference story).
 The community summaries were **regenerated** with it before the final eval.
 
+Two later upgrades: the summaries were regenerated **again with Qwen3-30B-A3B-Instruct-2507**
+(via `modal_build.py --stage summarize --llm-model …` — the MoE fits an A100-80GB in bf16 and
+markedly enriches the market-analysis prose that global search reads), and `QwenLLM` gained a
+third **`backend="vllm"`** (AsyncLLMEngine bridged behind the same sync
+`generate`/`generate_stream` API). HF `.generate()` decoded the 30B-A3B at ~6 tok/s; vLLM
+with CUDA graphs does **~115 tok/s** — this is what SPARDA's deployed demo serves with.
+
 ### Routing fix: keyword matching that actually matches
 
 The first eval run routed only **1 of 5** multi_hop queries correctly. The keyword router was
@@ -284,6 +291,15 @@ broadened the keyword set (`same brand`, `buy together`, `work with`, `frequentl
 `pairs with`, …), lifting **multi_hop routing 1/5 → 3/5** and overall routing to **10/12**.
 The two remaining misses are defensible label calls, not bugs (attribute-filter → local; a
 "vs" comparison → global).
+
+**Round 2 — the opposite failure mode.** Broad keywords over-matched: raw substring
+containment meant `"vs"` fired inside **"tvs"**, silently misrouting *"best 4K TVs under
+$500"* to global community search. The fix matches single keywords against whole **tokens**
+and stems (`trend*`, `compatib*`) against token substrings, keeping multi-word phrases as
+plain containment — 13/13 routing checks pass with every intended route preserved. (A
+matching audit fix: `_extract_entities` now guards valid-but-non-list LLM JSON — a bare
+`"Sony"` used to be iterated downstream into `['S','o','n','y']` — and entity linking uses a
+per-graph cached name index instead of re-scanning all ~65K nodes per entity per query.)
 
 ### Stack alignment: making the ColBERT reranker work
 
