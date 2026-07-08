@@ -343,8 +343,12 @@ def detect_communities_stage():
 
 
 @app.function(image=image, volumes={ARTIFACTS: vol}, gpu="A100", timeout=2 * 60 * 60)
-def summarize():
-    """Write LLM community summaries (real package code, Qwen injected) and embed them."""
+def summarize(llm_model: str = ""):
+    """Write LLM community summaries (real package code, Qwen injected) and embed them.
+
+    ``llm_model`` overrides LLM_MODEL for a one-off higher-quality regen (e.g.
+    Qwen/Qwen3-30B-A3B-Instruct-2507 — MoE 30B/3B-active, fits the A100-80GB in
+    bf16); summaries are read downstream from the volume, so no other change."""
     import json
     import pickle
     import numpy as np
@@ -356,8 +360,9 @@ def summarize():
     with open(COMMUNITIES_PKL, "rb") as f:
         comms = pickle.load(f)
 
-    print(f"[summarize] loading {LLM_MODEL} ...")
-    llm = _QwenSummarizer()
+    model_id = llm_model or LLM_MODEL
+    print(f"[summarize] loading {model_id} ...")
+    llm = _QwenSummarizer(model_id=model_id)
     print(f"[summarize] summarizing {len(comms['level_0'])} L0 communities ...")
     summaries = summarize_communities(G, comms["level_0"], llm)
 
@@ -441,12 +446,13 @@ def rag_eval():
 
 
 @app.local_entrypoint()
-def main(stage: str = "all", limit: int = 0):
+def main(stage: str = "all", limit: int = 0, llm_model: str = ""):
     """Orchestrate. stage: all | data | graph | enrich | community | summarize | rag_eval.
 
     NOTE: `all` = the 5 BUILD stages only; rag_eval is run explicitly afterwards
     (it needs V2's retrieval/pipeline code and burns extra A100 minutes):
         modal run --detach modal_build.py --stage rag_eval
+    ``--llm-model`` overrides the summarize stage's generator for a one-off regen.
     """
     order = ["data", "graph", "enrich", "community", "summarize"]
     if stage != "all" and stage != "rag_eval" and stage not in order:
@@ -462,6 +468,6 @@ def main(stage: str = "all", limit: int = 0):
     if "community" in todo:
         print("== community =="); print(detect_communities_stage.remote())
     if "summarize" in todo:
-        print("== summarize =="); print(summarize.remote())
+        print("== summarize =="); print(summarize.remote(llm_model=llm_model))
     if "rag_eval" in todo:
         print("== rag_eval =="); print(rag_eval.remote())
