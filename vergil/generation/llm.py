@@ -67,14 +67,15 @@ class QwenLLM:
 
             self.tok = AutoTokenizer.from_pretrained(model_path_or_id)
             self._SamplingParams = SamplingParams
-            # enforce_eager skips CUDA-graph capture (minutes of extra cold-start for a
-            # MoE) — eager decode of the 3B-active experts is still ~10x HF .generate().
-            # gpu_memory_utilization leaves headroom for the co-resident encoders
-            # (bi-encoder / bge-small / ColBERT live on the same GPU in SPARDA).
+            # CUDA graphs ON (enforce_eager=False): eager MoE decode measured only
+            # ~19 tok/s at batch 1 (kernel-launch bound); graph capture costs ~1 min
+            # more cold-start but roughly doubles+ decode. gpu_memory_utilization
+            # leaves headroom for the co-resident encoders (bi-encoder / bge-small /
+            # ColBERT live on the same GPU in SPARDA).
             self.engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(
                 model=model_path_or_id, dtype="bfloat16",
                 gpu_memory_utilization=0.85, max_model_len=16384,
-                enforce_eager=True, disable_log_stats=True,
+                enforce_eager=False, disable_log_stats=True,
             ))
             # vLLM's generate is async-only; run a dedicated event loop in a daemon
             # thread and bridge results back through a queue so the public sync
