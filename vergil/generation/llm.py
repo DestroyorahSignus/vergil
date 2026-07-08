@@ -72,10 +72,13 @@ class QwenLLM:
             # more cold-start but roughly doubles+ decode. gpu_memory_utilization
             # leaves headroom for the co-resident encoders (bi-encoder / bge-small /
             # ColBERT live on the same GPU in SPARDA).
+            # Capture CUDA graphs only for the batch sizes a low-traffic demo actually
+            # serves — vLLM's default captures dozens of sizes and made cold-start ~6 min.
             self.engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(
                 model=model_path_or_id, dtype="bfloat16",
                 gpu_memory_utilization=0.85, max_model_len=16384,
                 enforce_eager=False, disable_log_stats=True,
+                compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
             ))
             # vLLM's generate is async-only; run a dedicated event loop in a daemon
             # thread and bridge results back through a queue so the public sync
