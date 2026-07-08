@@ -53,13 +53,16 @@ def summarize_communities(G: nx.Graph, communities: list[list[str]], llm) -> lis
         for node_id in community[:30]:  # cap at 30 products per summary
             node_data = G.nodes[node_id]
             if node_data.get("type") == "product":
-                product_list.append(f"- {node_data['name']} (Brand: {_get_brand(G, node_id)})")
+                product_list.append(
+                    f"- {node_data.get('name', node_id)} (Brand: {_get_brand(G, node_id)})")
 
         # Get internal edges
         subgraph = G.subgraph(community)
         edge_list = []
         for u, v, data in subgraph.edges(data=True):
-            edge_list.append(f"- {G.nodes[u]['name'][:50]} --[{data.get('type', 'related')}]--> {G.nodes[v]['name'][:50]}")
+            edge_list.append(
+                f"- {str(G.nodes[u].get('name', u))[:50]} "
+                f"--[{data.get('type', 'related')}]--> {str(G.nodes[v].get('name', v))[:50]}")
 
         prompt = COMMUNITY_SUMMARY_PROMPT.format(
             product_list="\n".join(product_list[:20]),
@@ -97,9 +100,13 @@ def _get_brand(G: nx.Graph, product_id: str) -> str:
 
 
 def _get_top_brands(G: nx.Graph, community: list[str], top_n: int = 5) -> list[str]:
-    """Return the most-connected brands among the nodes in a community."""
+    """Return the names of the most-connected brands among the nodes in a community.
+
+    Plain brand-name strings (not (name, degree) tuples — earlier summaries.json
+    files stored tuples; downstream readers still accept both shapes)."""
     brands = {}
     for node in community:
         if G.nodes.get(node, {}).get("type") == "brand":
             brands[G.nodes[node].get("name", node)] = sum(1 for _ in G.neighbors(node))
-    return sorted(brands.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    ranked = sorted(brands.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    return [name for name, _ in ranked]

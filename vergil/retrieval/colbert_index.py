@@ -182,10 +182,3 @@ def maybe_colbert_rerank(query: str, candidates: list[dict], top_k: int | None =
     except Exception:
         _COLBERT_FAILED = True  # don't pay the failed-load cost again
         return candidates[:top_k]
-
-
-# --- Back-compat alias (pre-existing stub name) -------------------------------
-# The original stub was a RAGatouille-backed ColBERT retriever; the runtime
-# design replaced first-stage retrieval with the FAISS VectorIndex and moved
-# ColBERT to the (optional) rerank step above.
-ColBERTIndex = VectorIndex

@@ -1,5 +1,7 @@
 # retrieval/hybrid.py
 """Hybrid graph + vector retrieval: local, global, and multi-hop search."""
+import weakref
+
 import networkx as nx
 
 from ..graph.traversal import describe_path, extract_subgraph
@@ -25,6 +27,28 @@ _SIBLINGS_PER_HUB = 10
 _MATCHES_PER_ENTITY = 3
 _MAX_MATCHED_NODES = 10
 _FUZZ_CUTOFF = 80
+
+# Per-graph cache of the entity-linking name index (see _get_name_index).
+_NAME_INDEX_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _get_name_index(G) -> tuple[list[tuple], list[str]]:
+    """(node_id, lowercased-name) pairs for product/brand nodes, built once per graph.
+
+    multi_hop_search used to rebuild this by iterating every node in the ~65K-node
+    graph on EVERY query; caching it per graph object makes entity linking pay only
+    the per-entity match cost. WeakKeyDictionary ties the cache entry's lifetime to
+    the graph itself (no stale index if a new graph is loaded)."""
+    cached = _NAME_INDEX_CACHE.get(G)
+    if cached is None:
+        name_index = [
+            (node_id, str(data.get("name", "")).lower())
+            for node_id, data in G.nodes(data=True)
+            if data.get("type") in ("product", "brand") and data.get("name")
+        ]
+        cached = (name_index, [name for _, name in name_index])
+        _NAME_INDEX_CACHE[G] = cached
+    return cached
 
 
 def local_search(query: str, G: nx.Graph, vector_index, top_k: int = 10) -> list[dict]:
@@ -203,12 +227,9 @@ def multi_hop_search(query: str, G: nx.Graph, entities: list[str], max_hops: int
 
     # Step 1: entity linking against product + brand node names only
     # (category/feature hubs as seeds would drown the BFS in generic nodes).
-    name_index = [
-        (node_id, str(data.get("name", "")).lower())
-        for node_id, data in G.nodes(data=True)
-        if data.get("type") in ("product", "brand") and data.get("name")
-    ]
-    names_only = [name for _, name in name_index]
+    # The index is cached per graph (WeakKeyDictionary — auto-evicted when the
+    # graph is gc'd), so the 65K-node scan happens ONCE, not per query.
+    name_index, names_only = _get_name_index(G)
 
     matched: list[str] = []
     for entity in entities:

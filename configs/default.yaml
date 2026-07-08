@@ -1,4 +1,6 @@
-# VERGIL default configuration
+# VERGIL reference defaults — NOT auto-loaded.
+# The Modal build pipeline (modal_build.py) and library defaults hardcode their
+# own constants; this file documents them in one place. Keep it in sync.
 
 dataset:
   category: Electronics          # one of the Amazon Reviews 2023 categories
@@ -14,7 +16,7 @@ graph:
   similarity_top_k: 5            # max similar_to edges per product node
 
 community:
-  leiden_resolution: 1.0         # higher = smaller, more specific communities
+  leiden_resolution: 4.0         # higher = smaller, more specific communities (1.0 gave 25 blob communities for 50K products; 4.0 -> 73)
   level1_resolution_factor: 0.5  # L1 resolution = resolution * this
 
 retrieval:
@@ -23,8 +25,8 @@ retrieval:
   max_hops: 2                    # multi-hop BFS depth
 
 llm:
-  model_id: Qwen/Qwen2.5-7B-Instruct-GGUF
-  model_file: qwen2.5-7b-instruct-q4_k_m.gguf
+  model_id: Qwen/Qwen3-4B-Instruct-2507   # transformers backend (Modal A100)
+  # llama_cpp fallback (Kaggle T4): Qwen3-4B-Instruct-2507-GGUF Q4_K_M
   n_ctx: 4096
   n_gpu_layers: -1
   max_tokens: 600

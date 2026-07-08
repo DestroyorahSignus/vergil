@@ -1,4 +1,6 @@
 # generation/rag_pipeline.py
+import re
+
 from .prompts import (
     LOCAL_QA_PROMPT,
     GLOBAL_QA_PROMPT,
@@ -88,15 +90,32 @@ class VergilRAG:
 
     def _classify_query(self, query: str) -> str:
         q = query.lower()
-        global_keywords = ["compare", "vs", "versus", "trend", "overview", "popular",
-                           "best brands", "market", "landscape"]
-        multi_hop_keywords = ["works with", "work with", "compatible", "accessories",
-                              "same brand", "same-brand", "bought together", "buy together",
-                              "buy with", "frequently bought", "commonly bought", "pair with",
-                              "pairs with", "goes with", "go with", "along with", "go together"]
-        if any(kw in q for kw in global_keywords):
+        # Single words match on whole TOKENS (not raw substring — "vs" is a
+        # substring of "tvs", which misrouted "best 4K TVs under $500" to
+        # global); multi-word phrases still match as substrings. Stems match
+        # inside a token ("trend"→trending, "compatib"→compatibility/
+        # incompatible), preserving the old substring reach without the
+        # cross-word false positives.
+        tokens = set(re.findall(r"[a-z0-9']+", q))
+        global_words = ["compare", "vs", "versus", "overview", "popular",
+                        "market", "landscape"]
+        global_stems = ["trend"]
+        global_phrases = ["best brands"]
+        multi_hop_words = ["accessories"]
+        multi_hop_stems = ["compatib"]
+        multi_hop_phrases = ["works with", "work with",
+                             "same brand", "same-brand", "bought together", "buy together",
+                             "buy with", "frequently bought", "commonly bought", "pair with",
+                             "pairs with", "goes with", "go with", "along with", "go together"]
+
+        def _hit(words, stems, phrases):
+            return (any(w in tokens for w in words)
+                    or any(s in t for s in stems for t in tokens)
+                    or any(ph in q for ph in phrases))
+
+        if _hit(global_words, global_stems, global_phrases):
             return "global"
-        if any(kw in q for kw in multi_hop_keywords):
+        if _hit(multi_hop_words, multi_hop_stems, multi_hop_phrases):
             return "multi_hop"
         return "local"
 
@@ -107,7 +126,14 @@ class VergilRAG:
         )
         try:
             import json
-            return json.loads(response)
+            data = json.loads(response)
+            # Guard non-list JSON: a bare string/dict would otherwise be iterated
+            # downstream into characters/keys ("Sony" -> ['S','o','n','y']).
+            if isinstance(data, list):
+                return [str(e) for e in data]
+            if data:
+                return [str(data)]
+            return []
         except Exception:
             # Fallback: simple noun extraction
             return [w for w in query.split() if len(w) > 3 and w[0].isupper()]
@@ -117,8 +143,8 @@ class VergilRAG:
         blocks = []
         for community in context:
             brands = community.get("key_brands") or []
-            # key_brands entries are (name, degree) pairs from the summarizer,
-            # but tolerate plain strings (summaries.json round-trips as lists).
+            # key_brands entries are plain name strings from the summarizer, but
+            # tolerate legacy (name, degree) pairs from older summaries.json files.
             brand_names = ", ".join(
                 str(b[0]) if isinstance(b, (list, tuple)) and b else str(b)
                 for b in brands[:5]

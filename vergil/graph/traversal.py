@@ -54,19 +54,6 @@ def describe_path(G: nx.Graph, path: list[str]) -> str:
     return " ".join(parts)
 
 
-def shortest_path_desc(G: nx.Graph, src: str, dst: str) -> str | None:
-    """Return the human-readable shortest path between two nodes, or None.
-
-    Wraps nx.shortest_path + describe_path; returns None when either node is
-    missing or no path exists (callers treat that as "no citation available").
-    """
-    try:
-        path = nx.shortest_path(G, src, dst)
-    except (nx.NetworkXNoPath, nx.NodeNotFound):
-        return None
-    return describe_path(G, path)
-
-
 def extract_subgraph(
     G: nx.Graph, seeds: list[str], hops: int = 1, max_nodes: int = 1000
 ) -> nx.Graph:
@@ -95,18 +82,3 @@ def extract_subgraph(
                     return G.subgraph(visited).copy()
         frontier = next_frontier
     return G.subgraph(visited).copy()
-
-
-# --- Back-compat thin wrappers (pre-existing stub names) ---------------------
-
-def get_neighbors(G: nx.Graph, node_id: str, edge_types: list[str] | None = None) -> list[str]:
-    """Return neighbors of a node, optionally filtered by edge type."""
-    return [n for n, _ in product_neighbors(G, node_id, edge_types=edge_types, limit=10**9)]
-
-
-def shortest_paths(G: nx.Graph, source: str, target: str) -> list[list[str]]:
-    """Return shortest path(s) between two nodes for citation/reasoning chains."""
-    try:
-        return [list(p) for p in nx.all_shortest_paths(G, source, target)]
-    except (nx.NetworkXNoPath, nx.NodeNotFound):
-        return []
