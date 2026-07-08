@@ -8,9 +8,14 @@ Qwen2.5-7B-Instruct: at/above Qwen3-8B and above Qwen2.5-7B on benchmarks while
 using ~half the VRAM. Same standard apply_chat_template + .generate() path.
 
 * ``backend="transformers"`` (default) — HF ``AutoModelForCausalLM`` in bf16 on CUDA.
-  This is the Modal A100 route and mirrors the ``_QwenSummarizer`` used during the
+  This is the reference route and mirrors the ``_QwenSummarizer`` used during the
   build (``modal_build.py``), so build-time summaries and eval-time answers come
   from the exact same generation path.
+* ``backend="vllm"`` — vLLM AsyncLLMEngine (continuous batching, paged KV). ~10x
+  the decode speed of HF ``.generate()`` — plain HF runs Qwen3-30B-A3B at ~5-10
+  tok/s on an A100 while vLLM does 50-100+. Streaming is bridged to the same sync
+  ``generate_stream`` generator API via a background asyncio loop, so callers
+  don't change. Requires ``vllm`` in the image (serving images only).
 * ``backend="llama_cpp"`` — the original Q4_K_M GGUF route via ``llama-cpp-python``.
   This is the Kaggle T4 16GB inference route (~4.5GB model file); it is NOT used on
   Modal and ``llama_cpp`` is intentionally not in the Modal image.
@@ -48,11 +53,35 @@ class QwenLLM:
                 Qwen3-4B-Instruct-2507-Q4_K_M.gguf --local-dir models/
             (verify the exact filename on the repo before downloading).
         """
-        if backend not in ("transformers", "llama_cpp"):
-            raise ValueError(f"unknown backend {backend!r}; use 'transformers' or 'llama_cpp'")
+        if backend not in ("transformers", "vllm", "llama_cpp"):
+            raise ValueError(
+                f"unknown backend {backend!r}; use 'transformers', 'vllm' or 'llama_cpp'")
         self.backend = backend
 
-        if backend == "transformers":
+        if backend == "vllm":
+            import asyncio
+            import threading
+
+            from transformers import AutoTokenizer
+            from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+
+            self.tok = AutoTokenizer.from_pretrained(model_path_or_id)
+            self._SamplingParams = SamplingParams
+            # enforce_eager skips CUDA-graph capture (minutes of extra cold-start for a
+            # MoE) — eager decode of the 3B-active experts is still ~10x HF .generate().
+            # gpu_memory_utilization leaves headroom for the co-resident encoders
+            # (bi-encoder / bge-small / ColBERT live on the same GPU in SPARDA).
+            self.engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(
+                model=model_path_or_id, dtype="bfloat16",
+                gpu_memory_utilization=0.85, max_model_len=16384,
+                enforce_eager=True, disable_log_stats=True,
+            ))
+            # vLLM's generate is async-only; run a dedicated event loop in a daemon
+            # thread and bridge results back through a queue so the public sync
+            # generate/generate_stream API is unchanged for every caller.
+            self._loop = asyncio.new_event_loop()
+            threading.Thread(target=self._loop.run_forever, daemon=True).start()
+        elif backend == "transformers":
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -80,8 +109,44 @@ class QwenLLM:
                 verbose=False,
             )
 
+    def _vllm_stream(self, prompt: str, max_tokens: int, temperature: float):
+        """Yield text deltas from the background-loop AsyncLLMEngine (sync bridge)."""
+        import asyncio
+        import queue as _queue
+        import uuid
+
+        text = self.tok.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False, add_generation_prompt=True,
+        )
+        sp = self._SamplingParams(max_tokens=max_tokens, temperature=temperature)
+        q: "_queue.Queue" = _queue.Queue()
+
+        async def _run():
+            prev = ""
+            try:
+                async for out in self.engine.generate(text, sp, str(uuid.uuid4())):
+                    cur = out.outputs[0].text
+                    if len(cur) > len(prev):
+                        q.put(cur[len(prev):])
+                        prev = cur
+                q.put(None)
+            except Exception as exc:  # surface engine errors in the caller thread
+                q.put(exc)
+
+        asyncio.run_coroutine_threadsafe(_run(), self._loop)
+        while True:
+            item = q.get()
+            if item is None:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
     def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.1) -> str:
         """Single-turn chat completion; returns the stripped assistant text."""
+        if self.backend == "vllm":
+            return "".join(self._vllm_stream(prompt, max_tokens, temperature)).strip()
         if self.backend == "transformers":
             torch = self._torch
             text = self.tok.apply_chat_template(
@@ -111,6 +176,9 @@ class QwenLLM:
         Used by streaming UIs so the SSE/websocket connection keeps receiving data during a
         long generation instead of going idle (which a proxy will drop → 'connection lost').
         """
+        if self.backend == "vllm":
+            yield from self._vllm_stream(prompt, max_tokens, temperature)
+            return
         if self.backend == "transformers":
             import threading
 
